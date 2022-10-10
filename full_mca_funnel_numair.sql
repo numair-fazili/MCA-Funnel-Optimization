@@ -19,7 +19,7 @@ from (with ccy as (select distinct CURRENCY
                      IFF(up.class = 'com.transferwise.fx.user.PersonalUserProfile', 'Personal',
                          'Business')                                                                        profile_type,
                      a.COUNTRY_CODE                                                                         country_code,
-                     ccy.CURRENCY                                                                          currency,
+                     'N/A'                                                                                  currency,
                      date_trunc('month', up.DATE_CREATED)                                                   cohort_month,
                      date_trunc('week', up.DATE_CREATED)                                                    cohort_week,
                      up.date_created                                                                        profile_date_created,
@@ -28,7 +28,7 @@ from (with ccy as (select distinct CURRENCY
                      up.id::string                                                                          event_id
 
               from PROFILE.USER_PROFILE up
-                       cross join ccy  -- why is profile crossed with deposit currency account? - can be removed?
+                       --cross join ccy  -- why is profile crossed with deposit currency account? - can be removed?
                        join profile.ADDRESS a
                             ON up.ID = a.USER_PROFILE_ID and a.ADDRESS_TYPE = 'PRIMARY_USER_PROFILE_ADDRESS' -- what is the use of primary user profile address condition?
               where true
@@ -65,7 +65,7 @@ from (with ccy as (select distinct CURRENCY
                             join BALANCE.BALANCE mcab on mca.ID = mcab.ACCOUNT_ID
                    where true -- placeholder text - no functional impact (ignore)
                      and profile_date_created >= '2017-01-01'
-                     and CURRENCY in ('EUR','DKK','PLN','SEK','GBP','AUD','MYR','CAD','NZD','SGD','HUF','TRY','USD','RON','NOK') -- why are these hardcoded? - potentially because account details can only be issued for certain currencies - even then should be used as a param instead of hardcoded values
+                     --and CURRENCY in ('EUR','DKK','PLN','SEK','GBP','AUD','MYR','CAD','NZD','SGD','HUF','TRY','USD','RON','NOK') -- why are these hardcoded? - potentially because account details can only be issued for certain currencies - even then should be used as a param instead of hardcoded values
                )
           where date is not null
             and date < DATEADD(day, 30, profile_date_created) -- should be mentioned in the description (unless SOP) + what's the objective and how is this 30 day value computed?
@@ -254,6 +254,40 @@ from (with ccy as (select distinct CURRENCY
             and date < DATEADD(day, 30, profile_date_created)
             and receive_rank = 1
       )
+
+      UNION ALL
+      (
+          select profile_id,
+                 profile_type,
+                 country_code,
+                 currency,
+                 cohort_month,
+                 cohort_week,
+                 profile_date_created,
+                 date,
+                 '8. CARD ISSUED' as event, -- Follow up on step 3
+                 event_id::string
+          from (
+                   select up.id                                                                           profile_id,
+                          IFF(up.class = 'com.transferwise.fx.user.PersonalUserProfile', 'Personal',
+                              'Business')                                                                 profile_type,
+                          a.COUNTRY_CODE                                                                  country_code,
+                          date_trunc('month', up.DATE_CREATED)                                            cohort_month,
+                          date_trunc('week', up.DATE_CREATED)                                             cohort_week,
+                          up.date_created                                                                 profile_date_created,
+                          FCP.CREATION_TIME                                                               date,
+                          FCP.id                                                                          event_id,
+                          'NA'                                                                            currency
+                   from profile.USER_PROFILE up
+                            join profile.ADDRESS a
+                                 ON up.ID = a.USER_PROFILE_ID and a.ADDRESS_TYPE = 'PRIMARY_USER_PROFILE_ADDRESS'
+                            JOIN feature_charge.PAYMENT FCP ON FCP.USER_ID = a.USER_PROFILE_ID
+                   where true
+                     and profile_date_created >= '2017-01-01'
+                     and FCP.CREATION_FLOW = 'CARD_ORDER'
+                     and FCP.STATE = 'SUCCESSFUL'
+               )
+          )
 
      UNION ALL -- TO REVIEW
     (
