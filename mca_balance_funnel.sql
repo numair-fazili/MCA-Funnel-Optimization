@@ -105,7 +105,7 @@ from (
           where date is not null
             and date < DATEADD(day, 30, profile_date_created)
       )
-      UNION ALL -- VERIFICATION : NEED TO FIND TABLE
+      UNION ALL -- VERIFICATION : NEED TO FIND TABLE - skip for now
       (
           select profile_id,
                  profile_type,

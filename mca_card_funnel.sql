@@ -1,3 +1,10 @@
+-- Baseline params
+
+SET START_DATE = '2020-01-01'; -- used as a reference point of profile creation
+SET CARD_ISSUE_WINDOW =  30; -- all subsequent days must be within this value to the profile creation date
+SET CARD_ACTIVATION_WINDOW =  30;
+SET CARD_SPEND_5_TX_WINDOW =  30;
+
 CREATE
 OR REPLACE TABLE {{params.reports}}.mca_card_funnel AS(
 select profile_id as profile_id,
@@ -28,10 +35,10 @@ from (
                        join profile.ADDRESS a
                             ON up.ID = a.USER_PROFILE_ID and a.ADDRESS_TYPE = 'PRIMARY_USER_PROFILE_ADDRESS' -- what is the use of primary user profile address condition?
               where true
-                and profile_date_created >= '2017-01-01'
+                and  profile_date_created >= $START_DATE
           )
 
-     UNION ALL
+     UNION ALL -- FILTER users who ordered a car within 30 days of profile creation
       (
           select profile_id,
                  profile_type,
@@ -59,14 +66,14 @@ from (
                                  ON up.ID = a.USER_PROFILE_ID and a.ADDRESS_TYPE = 'PRIMARY_USER_PROFILE_ADDRESS'
                             JOIN REPORTS.PROFILE_CARD_ISSUANCE_SUMMARY PCIS ON PCIS.USER_ID = a.USER_PROFILE_ID
                    where true
-                     and profile_date_created >= '2017-01-01'
+                     and  profile_date_created >= $START_DATE
                )
               where date is not null
-            and date < DATEADD(day, 30, profile_date_created)
+            and date < DATEADD(day, $CARD_ISSUE_WINDOW, profile_date_created)
           )
 
 
-     UNION ALL
+     UNION ALL -- FILTER users who were issued a card within 30 days of profile creation
       (
           select profile_id,
                  profile_type,
@@ -94,13 +101,13 @@ from (
                                  ON up.ID = a.USER_PROFILE_ID and a.ADDRESS_TYPE = 'PRIMARY_USER_PROFILE_ADDRESS'
                             JOIN REPORTS.PROFILE_CARD_ISSUANCE_SUMMARY PCIS ON PCIS.USER_ID = a.USER_PROFILE_ID
                    where true
-                     and profile_date_created >= '2017-01-01'
+                     and  profile_date_created >= $START_DATE
                )
               where date is not null
-            and date < DATEADD(day, 30, profile_date_created)
+            and date < DATEADD(day, $CARD_ISSUE_WINDOW, profile_date_created)
           )
 
-     UNION ALL
+     UNION ALL -- FILTER users who activated a card within 30 days of profile creation (i.e performed a tx)
       (
           select profile_id,
                  profile_type,
@@ -128,14 +135,14 @@ from (
                                  ON up.ID = a.USER_PROFILE_ID and a.ADDRESS_TYPE = 'PRIMARY_USER_PROFILE_ADDRESS'
                             JOIN REPORTS.PROFILE_CARD_ISSUANCE_SUMMARY PCIS ON PCIS.USER_ID = a.USER_PROFILE_ID
                    where true
-                     and profile_date_created >= '2017-01-01'
+                     and  profile_date_created >= $START_DATE
                )
 
                     where date is not null
-            and date < DATEADD(day, 60, profile_date_created)
+            and date < DATEADD(day, $CARD_ACTIVATION_WINDOW, profile_date_created)
           )
 
-     UNION ALL
+     UNION ALL -- FILTER users who completed 5 tx card within 90 days of profile creation - The window period is increased since card is generally used while travelling. 
       (
           select profile_id,
                  profile_type,
@@ -163,10 +170,10 @@ from (
                                  ON up.ID = a.USER_PROFILE_ID and a.ADDRESS_TYPE = 'PRIMARY_USER_PROFILE_ADDRESS'
                             JOIN REPORTS.PROFILE_CARD_ISSUANCE_SUMMARY PCIS ON PCIS.USER_ID = a.USER_PROFILE_ID
                    where true
-                     and profile_date_created >= '2017-01-01'
+                     and  profile_date_created >= $START_DATE
                )
                 where date is not null
-            and date < DATEADD(day, 90, profile_date_created)
+            and date < DATEADD(day, $CARD_SPEND_5_TX_WINDOW, profile_date_created)
           )
 
      ));

@@ -1,5 +1,10 @@
+-- Baseline params
+
+SET START_DATE = '2020-01-01'; -- used as a reference point of profile creation
+SET WINDOW_PERIOD =  30; -- all subsequent days must be within this value to the profile creation date
+
 CREATE
-OR REPLACE TABLE {{params.reports}}.full_mca_funnel AS(
+OR REPLACE TABLE {{params.reports}}.mca_account_funnel AS(
 select profile_id as profile_id,
        profile_type as profile_type,
        country_code as country_code,
@@ -10,10 +15,7 @@ select profile_id as profile_id,
        date as date,
        event as event,
        event_id as event_id
-from (with ccy as (select distinct CURRENCY
-                   from DEPOSITACCOUNT.DEPOSIT_ACCOUNT da
-                            left join DEPOSITACCOUNT.BANK dab on dab.ID = da.BANK_ID
-                   where SETTLEMENT_TYPE = 'BALANCE') -- What is escrow in  SETTLEMENT_TYPE from DEPOSITACCOUNT.DEPOSIT_ACCOUNT;  any significant use case?
+from (
           (
               select up.id                                                                                  profile_id,
                      IFF(up.class = 'com.transferwise.fx.user.PersonalUserProfile', 'Personal',
@@ -28,14 +30,13 @@ from (with ccy as (select distinct CURRENCY
                      up.id::string                                                                          event_id
 
               from PROFILE.USER_PROFILE up
-                       --cross join ccy  -- why is profile crossed with deposit currency account? - can be removed?
                        join profile.ADDRESS a
                             ON up.ID = a.USER_PROFILE_ID and a.ADDRESS_TYPE = 'PRIMARY_USER_PROFILE_ADDRESS' -- what is the use of primary user profile address condition?
               where true
-                and profile_date_created >= '2017-01-01'
+                and profile_date_created >= $START_DATE
           )
 
-      UNION ALL
+      UNION ALL -- finding users who opened a balance account
       (
           select profile_id,
                  profile_type,
@@ -64,14 +65,16 @@ from (with ccy as (select distinct CURRENCY
                             join balance.ACCOUNT mca ON mca.profile_id = up.id
                             join BALANCE.BALANCE mcab on mca.ID = mcab.ACCOUNT_ID
                    where true -- placeholder text - no functional impact (ignore)
-                     and profile_date_created >= '2017-01-01'
-                     --and CURRENCY in ('EUR','DKK','PLN','SEK','GBP','AUD','MYR','CAD','NZD','SGD','HUF','TRY','USD','RON','NOK') -- why are these hardcoded? - potentially because account details can only be issued for certain currencies - even then should be used as a param instead of hardcoded values
+                     and profile_date_created >= $START_DATE
+                     and CURRENCY in  ('GBP','EUR','USD','AUD','NZD','SGD','RON','CAD','HUF','TRY')-- Account details are only available for these ccy's
+
+                   qualify row_number() over (partition by up.id order by mcab.CREATION_TIME) = 1
                )
           where date is not null
-            and date < DATEADD(day, 30, profile_date_created) -- should be mentioned in the description (unless SOP) + what's the objective and how is this 30 day value computed?
+            and date < DATEADD(day, $WINDOW_PERIOD, profile_date_created)
       )
 
-      UNION ALL
+      UNION ALL -- finding users who requested for bank details (note that users can open a balance account but not request for account details. This use case is analogous to holding currencies.
       (
           select profile_id,
                  profile_type,
@@ -98,52 +101,17 @@ from (with ccy as (select distinct CURRENCY
                             join profile.ADDRESS a
                                  ON up.ID = a.USER_PROFILE_ID and a.ADDRESS_TYPE = 'PRIMARY_USER_PROFILE_ADDRESS'
                             join REPORTS.REPORT_FC_BANK_DETAILS_ORDER_STATUS bdos ON bdos.profile_id = up.id -- This is only for tracking request for bank details - the outcome of this step is outlined in 6 : Bank details issued
-                   where 1=1
-                     and profile_date_created >= '2017-01-01'
-                     and CURRENCY in ('EUR','DKK','PLN','SEK','GBP','AUD','MYR','CAD','NZD','SGD','HUF','TRY','USD','RON','NOK')
-               )
-          where date is not null
-            and date < DATEADD(day, 30, profile_date_created)
-      )
-      UNION ALL
-      (
-          select profile_id,
-                 profile_type,
-                 country_code,
-                 currency,
-                 cohort_month,
-                 cohort_week,
-                 profile_date_created,
-                 date,
-                 '4. TOPPED UP OR PAID FEE' as event,
-                 event_id::string
-          from (
-                   select up.id                                                                            profile_id,
-                          IFF(up.class = 'com.transferwise.fx.user.PersonalUserProfile', 'Personal',
-                              'Business')                                                                  profile_type,
-                          a.COUNTRY_CODE                                                                   country_code,
-                          date_trunc('month', up.DATE_CREATED)                                             cohort_month,
-                          date_trunc('week', up.DATE_CREATED)                                              cohort_week,
-                          up.date_created                                                                  profile_date_created,
-                          coalesce(TOPUP_COMPLETION_TIME, FEE_COMPLETION_TIME, BANKDETAIL_INITIATION_TIME) date,
-                          bdos.order_id                                                                    event_id,
-                          bdos.CURRENCY                                                                    currency
-                   from profile.USER_PROFILE up
-                            join profile.ADDRESS a
-                                 ON up.ID = a.USER_PROFILE_ID and a.ADDRESS_TYPE = 'PRIMARY_USER_PROFILE_ADDRESS'
-                            join REPORTS.REPORT_FC_BANK_DETAILS_ORDER_STATUS bdos ON bdos.profile_id = up.id
                    where true
-                     and profile_date_created >= '2017-01-01'
-                     and CURRENCY in ('EUR','DKK','PLN','SEK','GBP','AUD','MYR','CAD','NZD','SGD','HUF','TRY','USD','RON','NOK')
-                     and (TOPUP_STATUS = 'DONE' or TOPUP_STATUS is null) and
-                          (FEE_STATUS = 'DONE' or FEE_STATUS is null)
-     -- refactor to and (TOPUP_STATUS = 'DONE' or FEE_STATUS = 'DONE')
+                     and profile_date_created >= $START_DATE
+                     and bdos.CURRENCY in  ('GBP','EUR','USD','AUD','NZD','SGD','RON','CAD','HUF','TRY')
 
+                   qualify row_number() over (partition by up.id order by bdos.BANKDETAIL_INITIATION_TIME) = 1
                )
           where date is not null
-            and date < DATEADD(day, 30, profile_date_created)
+            and date < DATEADD(day, $WINDOW_PERIOD, profile_date_created)
       )
-      UNION ALL
+
+      UNION ALL -- filtering verified users . To note that, top up and fee are not included in the funnel as these requirements were not originally part of MCA flow.
       (
           select profile_id,
                  profile_type,
@@ -153,7 +121,7 @@ from (with ccy as (select distinct CURRENCY
                  cohort_week,
                  profile_date_created,
                  date,
-                 '5. VERIFIED' as event,
+                 '4. VERIFIED' as event,
                  event_id::string
           from (
                    select up.id                                                     profile_id,
@@ -171,14 +139,16 @@ from (with ccy as (select distinct CURRENCY
                                  ON up.ID = a.USER_PROFILE_ID and a.ADDRESS_TYPE = 'PRIMARY_USER_PROFILE_ADDRESS'
                             join REPORTS.REPORT_FC_BANK_DETAILS_ORDER_STATUS bdos ON bdos.profile_id = up.id
                    where true
-                     and profile_date_created >= '2017-01-01'
-                     and CURRENCY in ('EUR','DKK','PLN','SEK','GBP','AUD','MYR','CAD','NZD','SGD','HUF','TRY','USD','RON','NOK')
+                     and profile_date_created >= $START_DATE
+                     and CURRENCY in  ('GBP','EUR','USD','AUD','NZD','SGD','RON','CAD','HUF','TRY')
                      and (VERIFICATION_STATUS = 'DONE')
+
+                   qualify row_number() over (partition by up.id order by coalesce(VERIFICATION_COMPLETION_TIME, BANKDETAIL_INITIATION_TIME)) = 1
                )
           where date is not null
-            and date < DATEADD(day, 30, profile_date_created)
+            and date < DATEADD(day, $WINDOW_PERIOD, profile_date_created)
       )
-      UNION ALL
+      UNION ALL -- filtering users for which bank details were issued
       (
           select profile_id,
                  profile_type,
@@ -188,7 +158,7 @@ from (with ccy as (select distinct CURRENCY
                  cohort_week,
                  profile_date_created,
                  date,
-                 '6. BANK DETAILS ISSUED' as event, -- Follow up on step 3
+                 '5. BANK DETAILS ISSUED' as event, -- Follow up on step 3
                  event_id::string
           from (
                    select up.id                                                                           profile_id,
@@ -198,11 +168,9 @@ from (with ccy as (select distinct CURRENCY
                           date_trunc('month', up.DATE_CREATED)                                            cohort_month,
                           date_trunc('week', up.DATE_CREATED)                                             cohort_week,
                           up.date_created                                                                 profile_date_created,
-                          ALLOCATION_TIME                                                                 date,
+                          da.ALLOCATION_TIME                                                              date,
                           da.id                                                                           event_id,
-                          b.CURRENCY                                                                      currency,
-                          row_number()
-                                  over (partition by up.id,b.CURRENCY order by da.ALLOCATION_TIME asc) as currency_rank
+                          b.CURRENCY                                                                      currency
                    from profile.USER_PROFILE up
                             join profile.ADDRESS a
                                  ON up.ID = a.USER_PROFILE_ID and a.ADDRESS_TYPE = 'PRIMARY_USER_PROFILE_ADDRESS'
@@ -210,14 +178,15 @@ from (with ccy as (select distinct CURRENCY
                                  ON da.profile_id = up.id and SETTLEMENT_TYPE = 'BALANCE'
                             join DEPOSITACCOUNT.BANK b on da.BANK_ID = b.id
                    where true
-                     and profile_date_created >= '2017-01-01'
-                     and CURRENCY in ('EUR','DKK','PLN','SEK','GBP','AUD','MYR','CAD','NZD','SGD','HUF','TRY','USD','RON','NOK')
+                     and profile_date_created >= $START_DATE
+                     and CURRENCY in  ('GBP','EUR','USD','AUD','NZD','SGD','RON','CAD','HUF','TRY')
+                   qualify row_number() over (partition by up.id order by da.ALLOCATION_TIME) = 1
                )
           where date is not null
-            and date < DATEADD(day, 30, profile_date_created)
-            and currency_rank = 1
+            and date < DATEADD(day, $WINDOW_PERIOD, profile_date_created)
       )
-      UNION ALL
+
+      UNION ALL -- filtering users who performed a cross currency TX
       (
           select profile_id,
                  profile_type,
@@ -227,7 +196,46 @@ from (with ccy as (select distinct CURRENCY
                  cohort_week,
                  profile_date_created,
                  date,
-                 '7. RECEIVED TO DETAILS' as event,  -- (AKA performed a tx - either receive or sent) TMK this means that user has performed a TX but the receive rank counts all the currency g if i PLACED 10 TX with USD and 1 with SGD, it gives be 2 records - should only return 1 irrespective of CUR
+                 '6. PERFORMED CROSS CCY TX' as event,
+                 event_id::string
+          from (
+                   select up.id                                                                                        profile_id,
+                          IFF(up.class = 'com.transferwise.fx.user.PersonalUserProfile', 'Personal',
+                              'Business')                                                                              profile_type,
+                          a.COUNTRY_CODE                                                                               country_code,
+                          date_trunc('month', up.DATE_CREATED)                                                         cohort_month,
+                          date_trunc('week', up.DATE_CREATED)                                                          cohort_week,
+                          up.date_created                                                                              profile_date_created,
+                          report_action_step.action_completion_time                                                    date,
+                          report_action_step.ACTION_ID                                                                 event_id,
+                          report_action_step.target_currency                                                           currency
+                   from profile.USER_PROFILE up
+                            join profile.ADDRESS a
+                                 ON up.ID = a.USER_PROFILE_ID and a.ADDRESS_TYPE = 'PRIMARY_USER_PROFILE_ADDRESS'
+                   INNER JOIN BALANCE.ACCOUNT  AS mca ON mca.PROFILE_ID = up.ID
+                   LEFT JOIN reports.report_action_step  AS report_action_step ON report_action_step.user_profile_id = mca.profile_id AND (report_action_step.successful_action = 1) = TRUE AND report_action_step.product_type IN ('BALANCE')
+                   WHERE true
+                     and (report_action_step.source_currency != report_action_step.target_currency ) AND (report_action_step.flag_for_aggregations = 1  )
+                     and profile_date_created >= $START_DATE
+                     and report_action_step.SOURCE_CURRENCY in  ('GBP','EUR','USD','AUD','NZD','SGD','RON','CAD','HUF','TRY')
+
+                   qualify row_number() over (partition by up.id order by report_action_step.action_completion_time) = 1
+               )
+          where date is not null
+            and date < DATEADD(day, $WINDOW_PERIOD, profile_date_created)
+      )
+
+      UNION ALL -- filtering users who received money in MCA account. This may exceed the previous event as it is contingent on how customers use the account.
+      (
+          select profile_id,
+                 profile_type,
+                 country_code,
+                 currency,
+                 cohort_month,
+                 cohort_week,
+                 profile_date_created,
+                 date,
+                 '7. RECEIVED TO DETAILS' as event,
                  event_id::string
           from (
                    select up.id                                                                                        profile_id,
@@ -247,93 +255,13 @@ from (with ccy as (select distinct CURRENCY
                                  ON up.ID = a.USER_PROFILE_ID and a.ADDRESS_TYPE = 'PRIMARY_USER_PROFILE_ADDRESS'
                             join REPORTS.RECEIVE_TRANSACTIONS rec on rec.PROFILE_ID = up.id
                    where true
-                     and profile_date_created >= '2017-01-01'
-                     and CURRENCY in ('EUR','DKK','PLN','SEK','GBP','AUD','MYR','CAD','NZD','SGD','HUF','TRY','USD','RON','NOK')
+                     and profile_date_created >= $START_DATE
+                     and CURRENCY in  ('GBP','EUR','USD','AUD','NZD','SGD','RON','CAD','HUF','TRY')
                )
           where date is not null
-            and date < DATEADD(day, 30, profile_date_created)
+            and date < DATEADD(day, $WINDOW_PERIOD, profile_date_created)
             and receive_rank = 1
       )
-
-      UNION ALL
-      (
-          select profile_id,
-                 profile_type,
-                 country_code,
-                 currency,
-                 cohort_month,
-                 cohort_week,
-                 profile_date_created,
-                 date,
-                 '8. CARD ISSUED' as event, -- Follow up on step 3
-                 event_id::string
-          from (
-                   select up.id                                                                           profile_id,
-                          IFF(up.class = 'com.transferwise.fx.user.PersonalUserProfile', 'Personal',
-                              'Business')                                                                 profile_type,
-                          a.COUNTRY_CODE                                                                  country_code,
-                          date_trunc('month', up.DATE_CREATED)                                            cohort_month,
-                          date_trunc('week', up.DATE_CREATED)                                             cohort_week,
-                          up.date_created                                                                 profile_date_created,
-                          FCP.CREATION_TIME                                                               date,
-                          FCP.id                                                                          event_id,
-                          'NA'                                                                            currency
-                   from profile.USER_PROFILE up
-                            join profile.ADDRESS a
-                                 ON up.ID = a.USER_PROFILE_ID and a.ADDRESS_TYPE = 'PRIMARY_USER_PROFILE_ADDRESS'
-                            JOIN feature_charge.PAYMENT FCP ON FCP.USER_ID = a.USER_PROFILE_ID
-                   where true
-                     and profile_date_created >= '2017-01-01'
-                     and FCP.CREATION_FLOW = 'CARD_ORDER'
-                     and FCP.STATE = 'SUCCESSFUL'
-               )
-          )
-
-     UNION ALL -- TO REVIEW
-    (
-        select profile_id,
-                     profile_type,
-                     country_code,
-                     currency,
-                     cohort_month,
-                     cohort_week,
-                     profile_date_created,
-                     date,
-                     '8. USED Send Money BEFORE' as event,
-                     event_id::string
-        from (
-
-            WITH SENDMONEY AS (SELECT USER_PROFILE_ID,SUBMIT_TIME FROM FX.REQUEST)
-            select
-                 up.id                                profile_id,
-                   IFF(up.class = 'com.transferwise.fx.user.PersonalUserProfile', 'Personal',
-                       'Business')                      profile_type,
-                   a.COUNTRY_CODE                       country_code,
-                   date_trunc('month', up.DATE_CREATED) cohort_month,
-                   date_trunc('week', up.DATE_CREATED)  cohort_week,
-                   mcab.CURRENCY                        currency,
-                   mcab.CREATION_TIME                   date,
-                   up.DATE_CREATED                      profile_date_created,
-                   mcab.id                              event_id,
-                   IFF(mcab.CREATION_TIME > (SELECT MIN(SENDMONEY.SUBMIT_TIME) FROM SENDMONEY where SENDMONEY.USER_PROFILE_ID = a.USER_PROFILE_ID),true,false) sendMoneyFirst
-            from profile.USER_PROFILE up
-                     join profile.ADDRESS a
-                          ON up.ID = a.USER_PROFILE_ID and a.ADDRESS_TYPE = 'PRIMARY_USER_PROFILE_ADDRESS'
-                     join balance.ACCOUNT mca ON mca.profile_id = up.id
-                     join BALANCE.BALANCE mcab on mca.ID = mcab.ACCOUNT_ID
-            where true -- placeholder text - no functional impact (ignore)
-              and profile_date_created >= '2017-01-01'
-              and CURRENCY in ('EUR', 'DKK', 'PLN', 'SEK', 'GBP', 'AUD', 'MYR', 'CAD', 'NZD', 'SGD', 'HUF', 'TRY', 'USD', 'RON',
-                               'NOK') -- why are these hardcoded? - potentially because account details can only be issued for certain currencies - even then should be used as a param instead of hardcoded values
-              qualify row_number() over (partition by up.id order by mcab.CREATION_TIME) = 1
-              order by mcab.CREATION_TIME)
-
-            where sendMoneyFirst = true
-            and date is not null
-            and date < DATEADD(day, 30, profile_date_created)
-
-        )
-
 
 
      ));
