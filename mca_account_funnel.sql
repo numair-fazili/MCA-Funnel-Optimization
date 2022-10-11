@@ -6,11 +6,7 @@ SET WINDOW_PERIOD =  30; -- all subsequent days must be within this value to the
 CREATE
 OR REPLACE TABLE {{params.reports}}.mca_account_funnel AS(
 select profile_id as profile_id,
-       profile_type as profile_type,
-       country_code as country_code,
        currency as currency,
-       cohort_month as cohort_month,
-       cohort_week as cohort_week,
        profile_date_created as profile_date_created,
        date as date,
        event as event,
@@ -18,12 +14,7 @@ select profile_id as profile_id,
 from (
           (
               select up.id                                                                                  profile_id,
-                     IFF(up.class = 'com.transferwise.fx.user.PersonalUserProfile', 'Personal',
-                         'Business')                                                                        profile_type,
-                     a.COUNTRY_CODE                                                                         country_code,
                      'N/A'                                                                                  currency,
-                     date_trunc('month', up.DATE_CREATED)                                                   cohort_month,
-                     date_trunc('week', up.DATE_CREATED)                                                    cohort_week,
                      up.date_created                                                                        profile_date_created,
                      up.DATE_CREATED                                                                        date,
                      '1. PROFILE_CREATED' as                                                                event,
@@ -36,29 +27,49 @@ from (
                 and profile_date_created >= $START_DATE
           )
 
-      UNION ALL -- finding users who opened a balance account
+      UNION ALL -- finding users who opened a balance account (all balances)
       (
           select profile_id,
-                 profile_type,
-                 country_code,
                  currency,
-                 cohort_month,
-                 cohort_week,
                  profile_date_created,
                  date,
                  '2. BALANCE_OPENED' as event,
                  event_id::string
           from (
                    select up.id                                profile_id,
-                          IFF(up.class = 'com.transferwise.fx.user.PersonalUserProfile', 'Personal',
-                              'Business')                      profile_type,
-                          a.COUNTRY_CODE                       country_code,
-                          date_trunc('month', up.DATE_CREATED) cohort_month,
-                          date_trunc('week', up.DATE_CREATED)  cohort_week,
                           mcab.CURRENCY                        currency, -- should only select a single balance - For on boarding funnel - only interested in whether a balance was opened or not (boolean)
                           mcab.CREATION_TIME                   date,
                           up.DATE_CREATED                      profile_date_created,
                           mcab.id                              event_id
+                   from profile.USER_PROFILE up
+                            join profile.ADDRESS a
+                                 ON up.ID = a.USER_PROFILE_ID and a.ADDRESS_TYPE = 'PRIMARY_USER_PROFILE_ADDRESS'
+                            join balance.ACCOUNT mca ON mca.profile_id = up.id
+                            join BALANCE.BALANCE mcab on mca.ID = mcab.ACCOUNT_ID
+                   where true -- placeholder text - no functional impact (ignore)
+                     and profile_date_created >= $START_DATE
+
+                   qualify row_number() over (partition by up.id order by mcab.CREATION_TIME) = 1
+               )
+          where date is not null
+            and date < DATEADD(day, $WINDOW_PERIOD, profile_date_created)
+      )
+
+
+      UNION ALL -- subset of above users who opened a balance account in currencies which have account details feature
+      (
+          select profile_id,
+                 currency,
+                 profile_date_created,
+                 date,
+                 '3. BALANCE_OPENED_CCY_WITH_ACC_DETAILS' as event,
+                 event_id::string
+          from (
+                   select up.id                                profile_id,
+                          mcab.CURRENCY                        currency,
+                          mcab.CREATION_TIME                   date,
+                          up.DATE_CREATED                      profile_date_created,
+                          CONCAT(mcab.id,9999)                       event_id -- can potentially overlap with the key used above if first balance account = first balance account with account details feature
                    from profile.USER_PROFILE up
                             join profile.ADDRESS a
                                  ON up.ID = a.USER_PROFILE_ID and a.ADDRESS_TYPE = 'PRIMARY_USER_PROFILE_ADDRESS'
@@ -77,22 +88,14 @@ from (
       UNION ALL -- finding users who requested for bank details (note that users can open a balance account but not request for account details. This use case is analogous to holding currencies.
       (
           select profile_id,
-                 profile_type,
-                 country_code,
                  currency,
-                 cohort_month,
-                 cohort_week,
                  profile_date_created,
                  date,
-                 '3. BANK_DETAIL_REQUESTED' as event,
+                 '4. BANK_DETAIL_REQUESTED' as event,
                  event_id::string
           from (
                    select up.id                                profile_id,
-                          IFF(up.class = 'com.transferwise.fx.user.PersonalUserProfile', 'Personal',
-                              'Business')                      profile_type,
-                          a.COUNTRY_CODE                       country_code,
-                          date_trunc('month', up.DATE_CREATED) cohort_month,
-                          date_trunc('week', up.DATE_CREATED)  cohort_week,
+
                           up.date_created                      profile_date_created,
                           bdos.BANKDETAIL_INITIATION_TIME      date,
                           bdos.order_id                        event_id,
@@ -114,22 +117,13 @@ from (
       UNION ALL -- filtering verified users . To note that, top up and fee are not included in the funnel as these requirements were not originally part of MCA flow.
       (
           select profile_id,
-                 profile_type,
-                 country_code,
                  currency,
-                 cohort_month,
-                 cohort_week,
                  profile_date_created,
                  date,
-                 '4. VERIFIED' as event,
+                 '5. VERIFIED' as event,
                  event_id::string
           from (
                    select up.id                                                     profile_id,
-                          IFF(up.class = 'com.transferwise.fx.user.PersonalUserProfile', 'Personal',
-                              'Business')                                           profile_type,
-                          a.COUNTRY_CODE                                            country_code,
-                          date_trunc('month', up.DATE_CREATED)                      cohort_month,
-                          date_trunc('week', up.DATE_CREATED)                       cohort_week,
                           up.date_created                                           profile_date_created,
                           coalesce(VERIFICATION_COMPLETION_TIME, BANKDETAIL_INITIATION_TIME) date,
                           bdos.order_id                                             event_id,
@@ -150,61 +144,41 @@ from (
       )
       UNION ALL -- filtering users for which bank details were issued
       (
-          select profile_id,
-                 profile_type,
-                 country_code,
+              select profile_id,
                  currency,
-                 cohort_month,
-                 cohort_week,
                  profile_date_created,
                  date,
-                 '5. BANK DETAILS ISSUED' as event, -- Follow up on step 3
+                 '6. BANK DETAILS ISSUED' as event, -- Follow up on step 3
                  event_id::string
-          from (
+              from (
                    select up.id                                                                           profile_id,
-                          IFF(up.class = 'com.transferwise.fx.user.PersonalUserProfile', 'Personal',
-                              'Business')                                                                 profile_type,
-                          a.COUNTRY_CODE                                                                  country_code,
-                          date_trunc('month', up.DATE_CREATED)                                            cohort_month,
-                          date_trunc('week', up.DATE_CREATED)                                             cohort_week,
                           up.date_created                                                                 profile_date_created,
-                          da.ALLOCATION_TIME                                                              date,
-                          da.id                                                                           event_id,
-                          b.CURRENCY                                                                      currency
+                          bdos.BANKDETAIL_ISSUANCE_TIME                                                   date,
+                          CONCAT(bdos.ORDER_ID,9999)                                                      event_id, -- clashes with previous - concat with 9999 for uniqueness
+                          bdos.CURRENCY                                                                      currency
                    from profile.USER_PROFILE up
                             join profile.ADDRESS a
                                  ON up.ID = a.USER_PROFILE_ID and a.ADDRESS_TYPE = 'PRIMARY_USER_PROFILE_ADDRESS'
-                            join DEPOSITACCOUNT.DEPOSIT_ACCOUNT da
-                                 ON da.profile_id = up.id and SETTLEMENT_TYPE = 'BALANCE'
-                            join DEPOSITACCOUNT.BANK b on da.BANK_ID = b.id
+                            join REPORTS.REPORT_FC_BANK_DETAILS_ORDER_STATUS bdos ON bdos.profile_id = up.id
                    where true
                      and profile_date_created >= $START_DATE
                      and CURRENCY in  ('GBP','EUR','USD','AUD','NZD','SGD','RON','CAD','HUF','TRY')
-                   qualify row_number() over (partition by up.id order by da.ALLOCATION_TIME) = 1
-               )
-          where date is not null
-            and date < DATEADD(day, $WINDOW_PERIOD, profile_date_created)
+                     and bdos.BANK_DETAILS_ISSUED = true
+                   qualify row_number() over (partition by up.id order by bdos.BANKDETAIL_ISSUANCE_TIME) = 1)
+              where date is not null
+                and date < DATEADD(day, $WINDOW_PERIOD, profile_date_created)
       )
 
       UNION ALL -- filtering users who performed a cross currency TX
       (
-          select profile_id,
-                 profile_type,
-                 country_code,
+              select profile_id,
                  currency,
-                 cohort_month,
-                 cohort_week,
                  profile_date_created,
                  date,
-                 '6. PERFORMED CROSS CCY TX' as event,
+                 '7. PERFORMED_CROSS_CCY_TX' as event,
                  event_id::string
-          from (
+              from (
                    select up.id                                                                                        profile_id,
-                          IFF(up.class = 'com.transferwise.fx.user.PersonalUserProfile', 'Personal',
-                              'Business')                                                                              profile_type,
-                          a.COUNTRY_CODE                                                                               country_code,
-                          date_trunc('month', up.DATE_CREATED)                                                         cohort_month,
-                          date_trunc('week', up.DATE_CREATED)                                                          cohort_week,
                           up.date_created                                                                              profile_date_created,
                           report_action_step.action_completion_time                                                    date,
                           report_action_step.ACTION_ID                                                                 event_id,
@@ -219,31 +193,21 @@ from (
                      and profile_date_created >= $START_DATE
                      and report_action_step.SOURCE_CURRENCY in  ('GBP','EUR','USD','AUD','NZD','SGD','RON','CAD','HUF','TRY')
 
-                   qualify row_number() over (partition by up.id order by report_action_step.action_completion_time) = 1
-               )
-          where date is not null
-            and date < DATEADD(day, $WINDOW_PERIOD, profile_date_created)
+                   qualify row_number() over (partition by up.id order by report_action_step.action_completion_time) = 1)
+              where date is not null
+                and date < DATEADD(day, $WINDOW_PERIOD, profile_date_created)
       )
 
       UNION ALL -- filtering users who received money in MCA account. This may exceed the previous event as it is contingent on how customers use the account.
       (
-          select profile_id,
-                 profile_type,
-                 country_code,
+              select profile_id,
                  currency,
-                 cohort_month,
-                 cohort_week,
                  profile_date_created,
                  date,
-                 '7. RECEIVED TO DETAILS' as event,
+                 '8. RECEIVED_TO_DETAILS' as event,
                  event_id::string
-          from (
+              from (
                    select up.id                                                                                        profile_id,
-                          IFF(up.class = 'com.transferwise.fx.user.PersonalUserProfile', 'Personal',
-                              'Business')                                                                              profile_type,
-                          a.COUNTRY_CODE                                                                               country_code,
-                          date_trunc('month', up.DATE_CREATED)                                                         cohort_month,
-                          date_trunc('week', up.DATE_CREATED)                                                          cohort_week,
                           up.date_created                                                                              profile_date_created,
                           rec.RECEIVAL_DATE                                                                            date,
                           rec.REQUEST_ID                                                                               event_id,
@@ -256,11 +220,10 @@ from (
                             join REPORTS.RECEIVE_TRANSACTIONS rec on rec.PROFILE_ID = up.id
                    where true
                      and profile_date_created >= $START_DATE
-                     and CURRENCY in  ('GBP','EUR','USD','AUD','NZD','SGD','RON','CAD','HUF','TRY')
-               )
-          where date is not null
-            and date < DATEADD(day, $WINDOW_PERIOD, profile_date_created)
-            and receive_rank = 1
+                     and CURRENCY in  ('GBP','EUR','USD','AUD','NZD','SGD','RON','CAD','HUF','TRY'))
+              where date is not null
+                and date < DATEADD(day, $WINDOW_PERIOD, profile_date_created)
+                and receive_rank = 1
       )
 
 
