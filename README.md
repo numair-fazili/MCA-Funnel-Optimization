@@ -1,7 +1,7 @@
 ## MCA-Funnel-Optimization
 Optimisation for MCA Funnel
 
-##Objective
+## Objective
 
 Create MCA funnels to study the journey of newly onboarded customers. There are three funnels for each of balance (pending), account and spend (card) journeys.  
 
