@@ -2,11 +2,10 @@
 
 SET START_DATE = '2020-01-01'; -- used as a reference point of profile creation
 SET CARD_ISSUE_WINDOW =  30; -- all subsequent days must be within this value to the profile creation date
-SET CARD_ACTIVATION_WINDOW =  30;
-SET CARD_SPEND_5_TX_WINDOW =  30;
+SET CARD_ACTIVATION_WINDOW =  60;
+SET CARD_SPEND_5_TX_WINDOW =  90;
 
-CREATE
-OR REPLACE TABLE {{params.reports}}.mca_card_funnel AS(
+CREATE OR REPLACE TABLE {{params.reports}}.mca_card_funnel_load AS (
 select profile_id as profile_id,
        profile_type as profile_type,
        country_code as country_code,
@@ -177,3 +176,8 @@ from (
           )
 
      ));
+
+DROP TABLE IF EXISTS {{params.reports}}.mca_card_funnel;
+ALTER TABLE {{params.reports}}.mca_card_funnel_load
+       RENAME TO {{params.reports}}.mca_card_funnel;
+
